@@ -1,0 +1,302 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AI チャット</title>
+    <link rel="stylesheet" href="./css/style.css">
+</head>
+<body>
+    <div class="chat-container">
+        <div class="chat-header">
+            🤖 AI チャット
+        </div>
+        <div class="chat-messages" id="chatMessages">
+            <div class="message ai-message">
+                こんにちは！何でも聞いてくださいね 😊
+            </div>
+        </div>
+        <div class="chat-input">
+            <input type="text" id="messageInput" placeholder="メッセージを入力してください..." />
+            <button id="sendButton">送信</button>
+        </div>
+    </div>
+    
+    <!-- jQuery -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/jquery/3.6.0/jquery.min.js"></script>
+    <!-- Axios -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/axios/0.27.2/axios.min.js"></script>
+    <!-- Firebase v9 (正しいCDN) -->
+    <script src="https://www.gstatic.com/firebasejs/11.9.1/firebase-app-compat.js"></script>
+    <script src="https://www.gstatic.com/firebasejs/11.9.1/firebase-firestore-compat.js"></script>
+    
+    <script>
+        // ===== 設定情報 =====
+        // ⚠️ これらの値を実際の値に置き換えてください
+        const GEMINI_API_KEY = ''; // Gemini APIキーを入力
+
+        // Firebase設定
+        const firebaseConfig = {
+            apiKey: "",
+            authDomain: "kadai05-api-4fc7c.firebaseapp.com",
+            projectId: "kadai05-api-4fc7c",
+            storageBucket: "kadai05-api-4fc7c.firebasestorage.app",
+            messagingSenderId: "886798501545",
+            appId: "1:886798501545:web:3e2aea73817053f0d40bb8"
+        };
+
+        // Firebase初期化（エラーハンドリング付き）
+        let db;
+        try {
+            firebase.initializeApp(firebaseConfig);
+            db = firebase.firestore();
+            console.log('Firebase初期化成功');
+        } catch (error) {
+            console.error('Firebase初期化エラー:', error);
+        }
+
+        // ===== チャット機能 =====
+        class ChatApp {
+            constructor() {
+                this.chatMessages = $('#chatMessages');
+                this.messageInput = $('#messageInput');
+                this.sendButton = $('#sendButton');
+                this.isLoading = false;
+
+                this.initializeEvents();
+                this.loadChatHistory();
+                this.validateAPIKey(); // APIキー検証を追加
+            }
+
+            // APIキーの検証
+            async validateAPIKey() {
+                if (GEMINI_API_KEY === 'YOUR_GEMINI_API_KEY_HERE') {
+                    return;
+                }
+
+                try {
+                    await this.callGeminiAPI('こんにちは');
+                    console.log('APIキー検証成功');
+                    this.addMessage('APIの接続が確認できました！', 'ai');
+                } catch (error) {
+                    console.error('APIキー検証失敗:', error);
+                    this.addMessage(`❌ API接続エラー: ${error.message}`, 'ai');
+                }
+            }
+
+            // イベントリスナーの設定
+            initializeEvents() {
+                // 送信ボタンのクリック
+                this.sendButton.on('click', () => {
+                    this.sendMessage();
+                });
+
+                // Enterキーで送信
+                this.messageInput.on('keypress', (e) => {
+                    if (e.which === 13 && !this.isLoading) {
+                        this.sendMessage();
+                    }
+                });
+            }
+
+            // メッセージ送信
+            async sendMessage() {
+                const message = this.messageInput.val().trim();
+                if (!message || this.isLoading) return;
+
+                // ユーザーメッセージを表示
+                this.addMessage(message, 'user');
+                this.messageInput.val('');
+                this.setLoading(true);
+
+                // ローディング表示
+                const loadingElement = this.addMessage('考えています...', 'loading');
+
+                try {
+                    // Gemini APIにリクエスト
+                    const aiResponse = await this.callGeminiAPI(message);
+
+                    // ローディングを削除
+                    loadingElement.remove();
+
+                    // AIの回答を表示
+                    this.addMessage(aiResponse, 'ai');
+
+                    // Firebaseに保存
+                    await this.saveToFirebase(message, aiResponse);
+
+                } catch (error) {
+                    console.error('エラーが発生しました:', error);
+                    loadingElement.remove();
+                    this.addMessage('すみません、エラーが発生しました。もう一度試してください。', 'ai');
+                } finally {
+                    this.setLoading(false);
+                }
+            }
+
+            // Gemini APIを呼び出し
+            async callGeminiAPI(message) {
+                // 正しいGemini API URL（2025年版）
+                const url = `https://generativelanguage.googleapis.com/v1/models/gemini-1.5-flash:generateContent?key=${GEMINI_API_KEY}`;
+
+                const data = {
+                    contents: [{
+                        parts: [{
+                            text: message
+                        }]
+                    }],
+                    generationConfig: {
+                        temperature: 0.7,
+                        topK: 40,
+                        topP: 0.95,
+                        maxOutputTokens: 1024,
+                    }
+                };
+
+                try {
+                    console.log('Gemini APIにリクエスト中...', url);
+
+                    const response = await axios.post(url, data, {
+                        headers: {
+                            'Content-Type': 'application/json'
+                        },
+                        timeout: 30000 // 30秒タイムアウト
+                    });
+
+                    console.log('Gemini APIレスポンス:', response.data);
+
+                    if (response.data && response.data.candidates && response.data.candidates[0]) {
+                        const aiResponse = response.data.candidates[0].content.parts[0].text;
+                        return aiResponse;
+                    } else {
+                        console.error('予期しないレスポンス構造:', response.data);
+                        throw new Error('APIからの回答がありません');
+                    }
+                } catch (error) {
+                    console.error('Gemini API エラー詳細:');
+                    console.error('- Status:', error.response?.status);
+                    console.error('- Status Text:', error.response?.statusText);
+                    console.error('- Response Data:', error.response?.data);
+                    console.error('- Error Message:', error.message);
+
+                    if (error.response?.status === 400) {
+                        throw new Error('APIキーが無効か、リクエスト形式が間違っています');
+                    } else if (error.response?.status === 403) {
+                        throw new Error('APIキーの権限がありません');
+                    } else if (error.response?.status === 404) {
+                        throw new Error('APIエンドポイントが見つかりません。URLを確認してください');
+                    } else {
+                        throw new Error(`API呼び出しに失敗しました: ${error.message}`);
+                    }
+                }
+            }
+
+            // Firebaseに会話を保存
+            async saveToFirebase(userMessage, aiResponse) {
+                try {
+                    await db.collection('chats').add({
+                        userMessage: userMessage,
+                        aiResponse: aiResponse,
+                        timestamp: firebase.firestore.FieldValue.serverTimestamp()
+                    });
+                    console.log('Firebaseに保存しました');
+                } catch (error) {
+                    console.error('Firebase保存エラー:', error);
+                }
+            }
+
+            // 過去の会話履歴を読み込み
+            async loadChatHistory() {
+                if (!db) {
+                    console.log('Firebaseが初期化されていないため、履歴を読み込めません');
+                    return;
+                }
+
+                try {
+                    const snapshot = await db.collection('chats')
+                        .orderBy('timestamp', 'desc')
+                        .limit(20)
+                        .get();
+
+                    const messages = [];
+                    snapshot.forEach(doc => {
+                        messages.push(doc.data());
+                    });
+
+                    // 新しい順→古い順に並び替え
+                    messages.reverse();
+
+                    // 履歴を表示（最初の挨拶は残す）
+                    messages.forEach(msg => {
+                        this.addMessage(msg.userMessage, 'user');
+                        this.addMessage(msg.aiResponse, 'ai');
+                    });
+
+                } catch (error) {
+                    console.error('履歴読み込みエラー:', error);
+                }
+            }
+
+            // メッセージを画面に追加
+            addMessage(text, type) {
+                let className = 'message ';
+                if (type === 'user') {
+                    className += 'user-message';
+                } else if (type === 'ai') {
+                    className += 'ai-message';
+                } else if (type === 'loading') {
+                    className += 'loading';
+                }
+
+                const messageElement = $(`<div class="${className}">${text}</div>`);
+                this.chatMessages.append(messageElement);
+                this.scrollToBottom();
+
+                return messageElement;
+            }
+
+            // 画面を一番下にスクロール
+            scrollToBottom() {
+                this.chatMessages.scrollTop(this.chatMessages[0].scrollHeight);
+            }
+
+            // ローディング状態の切り替え
+            setLoading(loading) {
+                this.isLoading = loading;
+                this.sendButton.prop('disabled', loading);
+                this.messageInput.prop('disabled', loading);
+
+                if (loading) {
+                    this.sendButton.text('送信中...');
+                } else {
+                    this.sendButton.text('送信');
+                }
+            }
+        }
+
+        // アプリ開始
+        $(document).ready(() => {
+            // Firebase読み込み確認
+            if (typeof firebase === 'undefined') {
+                $('#chatMessages').append('<div class="error-message">⚠️ Firebaseが読み込まれていません。CDNを確認してください。</div>');
+                return;
+            }
+
+            // APIキーが設定されているかチェック
+            if (GEMINI_API_KEY === 'YOUR_GEMINI_API_KEY_HERE') {
+                $('#chatMessages').append('<div class="error-message">⚠️ Gemini APIキーを設定してください</div>');
+                return;
+            }
+
+            if (firebaseConfig.apiKey === 'YOUR_FIREBASE_API_KEY') {
+                $('#chatMessages').append('<div class="error-message">⚠️ Firebase設定を入力してください</div>');
+                return;
+            }
+
+            new ChatApp();
+        });
+
+    </script>
+    
+</body>
+</html>
